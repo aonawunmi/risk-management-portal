@@ -1,26 +1,35 @@
-# app.py -- A Streamlit-based Risk Management Portal
-# Run with: streamlit run app.py
+# app.py — Risk Management Portal (enhanced)
+# Run: streamlit run app.py
 
-import pandas as pd
-import streamlit as st
-import plotly.express as px
-import numpy as np
 import io
+import json
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
 # ---------- App setup ----------
 st.set_page_config(
     page_title="Risk Management Portal",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 st.title("Risk Management Portal")
-st.markdown(
-    """
-    This portal allows you to manage and analyze your risks using a comprehensive framework.
-    Start with the **Risk Register** to define your risks and controls.
-    """
+st.caption(
+    "Define risks & controls, analyze exposure, and export reports. "
+    "Use the sidebar to tune DIME weights globally."
 )
+
+# ---------- Sidebar: DIME Weights ----------
+with st.sidebar:
+    st.markdown("### DIME Weights")
+    wD = st.slider("Design weight", 0.0, 1.0, 0.35, 0.05)
+    wI = st.slider("Implementation weight", 0.0, 1.0, 0.35, 0.05)
+    wM = st.slider("Monitoring weight", 0.0, 1.0, 0.15, 0.05)
+    wE = st.slider("Evaluation weight", 0.0, 1.0, 0.15, 0.05)
+    DIME_WEIGHTS = {"D": wD, "I": wI, "M": wM, "E": wE}
+
 
 # ---------- Helper Functions ----------
 def calculate_risk_score(likelihood, impact):
@@ -28,60 +37,90 @@ def calculate_risk_score(likelihood, impact):
         return np.nan
     return likelihood * impact
 
-def calculate_control_efficacy(design, implementation, monitoring, evaluation):
-    if pd.isna(design) or pd.isna(implementation) or pd.isna(monitoring) or pd.isna(evaluation):
+
+def calculate_control_efficacy(design, implementation, monitoring, evaluation, w=None):
+    """
+    Weighted DIME efficacy on [0,1]. Returns np.nan if any score missing.
+    Efficacy is 0 if Design or Implementation is 0.
+    """
+    if any(pd.isna(x) for x in [design, implementation, monitoring, evaluation]):
         return np.nan
     if design == 0 or implementation == 0:
-        return 0
-    return (design + implementation + monitoring + evaluation) / 12
+        return 0.0
+    if w is None:
+        w = {"D": 0.35, "I": 0.35, "M": 0.15, "E": 0.15}
+    total_w = w["D"] + w["I"] + w["M"] + w["E"]
+    score = (
+        w["D"] * design
+        + w["I"] * implementation
+        + w["M"] * monitoring
+        + w["E"] * evaluation
+    ) / (3 * total_w)
+    return round(float(score), 4)
 
-def calculate_residual_risk(inherent_likelihood, inherent_impact, control_efficacy_score, controlled_dimension):
-    if pd.isna(inherent_likelihood) or pd.isna(inherent_impact) or pd.isna(control_efficacy_score):
+
+def calculate_residual_risk(inherent_likelihood, inherent_impact, control_eff_score, controlled_dimension):
+    if pd.isna(inherent_likelihood) or pd.isna(inherent_impact) or pd.isna(control_eff_score):
         return np.nan
-    
+
     adjusted_likelihood = inherent_likelihood
     adjusted_impact = inherent_impact
-    
-    if controlled_dimension == 'Likelihood':
-        adjusted_likelihood = round(inherent_likelihood * (1 - control_efficacy_score))
-    elif controlled_dimension == 'Impact':
-        adjusted_impact = round(inherent_impact * (1 - control_efficacy_score))
-        
+
+    if controlled_dimension == "Likelihood":
+        adjusted_likelihood = max(1, round(inherent_likelihood * (1 - control_eff_score)))
+    elif controlled_dimension == "Impact":
+        adjusted_impact = max(1, round(inherent_impact * (1 - control_eff_score)))
+
     return adjusted_likelihood * adjusted_impact
 
+
 def create_risk_matrix(df: pd.DataFrame):
-    max_score = df['Residual Risk Score'].max() if not df.empty else 1
-    colors = px.colors.sequential.YlOrRd
-    
+    """Improved 5x5 matrix with grid + high-risk shading."""
+    if df.empty:
+        st.info("No data to chart.")
+        return
+
+    max_score = df["Residual Risk Score"].max() if df["Residual Risk Score"].notna().any() else 1
     fig = px.scatter(
         df,
-        x='Likelihood',
-        y='Impact',
-        color='Residual Risk Score',
-        size='Residual Risk Score',
-        color_continuous_scale=colors,
-        range_color=[0, max_score],
-        labels={
-            "Likelihood": "Likelihood (1-5)",
-            "Impact": "Impact (1-5)",
-            "Residual Risk Score": "Residual Risk Score"
+        x="Likelihood",
+        y="Impact",
+        color="Residual Risk Score",
+        size="Residual Risk Score",
+        hover_name="Risk Name",
+        hover_data={
+            "Risk ID": True,
+            "Inherent Risk Score": True,
+            "Mapped Control": True,
+            "Risk Category": True,
+            "Status": True,
+            "Residual Risk Score": True,
         },
-        hover_data={'Risk Name': True, 'Inherent Risk Score': True, 'Mitigation Actions': True}
+        color_continuous_scale=px.colors.sequential.YlOrRd,
+        range_color=[0, max_score],
     )
+
+    # grid + high-risk zone
+    shapes = []
+    for i in range(1, 6):
+        shapes.append(dict(type="line", x0=0.5, x1=5.5, y0=i, y1=i, line=dict(color="rgba(150,150,150,0.2)")))
+        shapes.append(dict(type="line", x0=i, x1=i, y0=0.5, y1=5.5, line=dict(color="rgba(150,150,150,0.2)")))
+    shapes.append(dict(type="rect", x0=3.5, x1=5.5, y0=3.5, y1=5.5, fillcolor="rgba(255,0,0,0.05)", line=dict(width=0)))
 
     fig.update_layout(
-        title={'text': "Residual Risk Matrix", 'y':0.9, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'},
+        title="Residual Risk Matrix",
         xaxis=dict(tickvals=[1, 2, 3, 4, 5], range=[0.5, 5.5], title="Likelihood"),
         yaxis=dict(tickvals=[1, 2, 3, 4, 5], range=[0.5, 5.5], title="Impact"),
-        height=500,
-        width=600
+        shapes=shapes,
+        height=560,
     )
-    
     st.plotly_chart(fig, use_container_width=True)
 
+
 def to_excel(df_dict: dict) -> bytes:
+    """Create a multi-sheet Excel in-memory."""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet_name, df in df_dict.items():
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     return output.getvalue()
@@ -89,30 +128,43 @@ def to_excel(df_dict: dict) -> bytes:
 
 # ---------- Session State Initialization ----------
 if "risk_register" not in st.session_state:
-    st.session_state.risk_register = pd.DataFrame({
-        "Risk Name": ["Cybersecurity Threat", "Supply Chain Disruption"],
-        "Description": ["Unauthorized access to company data.", "Breakdown in critical supply chain." ],
-        "Likelihood": [4, 3],
-        "Impact": [5, 4],
-        "Inherent Risk Score": [20, 12],
-        "Mitigation Actions": ["Implement stronger firewalls.", "Diversify key suppliers."],
-        "Risk Response": ["Control", "Transfer"],
-        "Mapped Control": ["Control A", "Control B"],
-        "Risk Category": ["Operational", "Strategic"],
-        "Period": ["Q1-2024", "Q1-2024"]
-    })
+    st.session_state.risk_register = pd.DataFrame(
+        {
+            "Risk ID": ["R-001", "R-002"],
+            "Risk Name": ["Cybersecurity Threat", "Supply Chain Disruption"],
+            "Description": [
+                "Unauthorized access to company data.",
+                "Breakdown in critical supply chain.",
+            ],
+            "Likelihood": [4, 3],
+            "Impact": [5, 4],
+            "Inherent Risk Score": [20, 12],
+            "Mitigation Actions": ["Implement stronger firewalls.", "Diversify key suppliers."],
+            "Risk Response": ["Control", "Transfer"],
+            "Mapped Control": ["Control A", "Control B"],
+            "Risk Category": ["Operational", "Strategic"],
+            "Period": ["Q1-2024", "Q1-2024"],
+            "Owner": ["CISO", "COO"],
+            "Status": ["Open", "In Progress"],
+            "Due Date": ["2024-12-31", "2024-11-15"],
+            "Residual Risk Score": [np.nan, np.nan],  # computed live
+        }
+    )
 
 if "control_register" not in st.session_state:
-    st.session_state.control_register = pd.DataFrame({
-        "Control Name": ["Control A", "Control B"],
-        "Description": ["Firewall policy.", "Supplier diversification." ],
-        "Dimension Controlled": ["Likelihood", "Impact"],
-        "Design": [3, 2],
-        "Implementation": [3, 3],
-        "Monitoring": [3, 2],
-        "Evaluation": [2, 3],
-        "Control Efficacy Score": [0.83, 0.75]
-    })
+    st.session_state.control_register = pd.DataFrame(
+        {
+            "Control Name": ["Control A", "Control B"],
+            "Description": ["Firewall policy.", "Supplier diversification."],
+            "Dimension Controlled": ["Likelihood", "Impact"],
+            "Design": [3, 2],
+            "Implementation": [3, 3],
+            "Monitoring": [3, 2],
+            "Evaluation": [2, 3],
+            # raw efficacy in [0,1], computed live
+            "Control Efficacy Score": [0.83, 0.75],
+        }
+    )
 
 
 # ---------- UI Tabs ----------
@@ -125,37 +177,59 @@ with tab1:
     st.subheader("Risk Register")
     st.caption("Define and manage all identified risks.")
 
-    control_list = ['None'] + st.session_state.control_register['Control Name'].unique().tolist()
-    
+    control_list = ["None"] + st.session_state.control_register["Control Name"].dropna().unique().tolist()
+
     edited_df = st.data_editor(
         st.session_state.risk_register,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
+            "Risk ID": st.column_config.TextColumn("Risk ID", disabled=True, help="Stable identifier"),
+            "Risk Name": st.column_config.TextColumn("Risk Name", required=True),
+            "Description": st.column_config.TextColumn("Description"),
             "Likelihood": st.column_config.NumberColumn("Likelihood (1-5)", min_value=1, max_value=5, step=1, required=True),
             "Impact": st.column_config.NumberColumn("Impact (1-5)", min_value=1, max_value=5, step=1, required=True),
-            "Inherent Risk Score": st.column_config.NumberColumn("Inherent Risk Score", disabled=True),
+            "Inherent Risk Score": st.column_config.NumberColumn("Inherent Risk Score", disabled=True, help="Likelihood × Impact"),
+            "Mitigation Actions": st.column_config.TextColumn("Mitigation Actions"),
             "Risk Response": st.column_config.SelectboxColumn("Risk Response", options=["Acceptance", "Control", "Avoidance", "Transfer"], required=True),
             "Mapped Control": st.column_config.SelectboxColumn("Mapped Control", options=control_list, required=True),
             "Risk Category": st.column_config.SelectboxColumn("Risk Category", options=["Operational", "Financial", "Strategic", "Compliance"], required=True),
-            "Period": st.column_config.TextColumn("Period", required=True),
-            "Residual Risk Score": st.column_config.NumberColumn("Residual Risk Score", disabled=True)
-        }
+            "Period": st.column_config.TextColumn("Period", help="e.g., Q1-2024", required=True),
+            "Owner": st.column_config.TextColumn("Owner", help="Accountable person/role", required=True),
+            "Status": st.column_config.SelectboxColumn("Status", options=["Open", "In Progress", "Mitigated", "Closed"], required=True),
+            "Due Date": st.column_config.DateColumn("Due Date"),
+            "Residual Risk Score": st.column_config.NumberColumn("Residual Risk Score", disabled=True, help="Post-control score"),
+        },
     )
 
-    edited_df['Inherent Risk Score'] = edited_df.apply(lambda row: calculate_risk_score(row['Likelihood'], row['Impact']), axis=1)
-    
-    control_map = st.session_state.control_register.set_index('Control Name')
-    def get_residual_risk(row):
-        control_name = row['Mapped Control']
-        if control_name and control_name != 'None' and control_name in control_map.index:
-            control_row = control_map.loc[control_name]
-            efficacy = control_row['Control Efficacy Score']
-            dimension = control_row['Dimension Controlled']
-            return calculate_residual_risk(row['Likelihood'], row['Impact'], efficacy, dimension)
-        return row['Inherent Risk Score']
-        
-    edited_df['Residual Risk Score'] = edited_df.apply(get_residual_risk, axis=1)
+    # Assign Risk IDs to new rows
+    if "Risk ID" not in edited_df.columns:
+        edited_df["Risk ID"] = np.nan
+    missing_ids = edited_df["Risk ID"].isna()
+    if missing_ids.any():
+        existing_nums = pd.to_numeric(edited_df["Risk ID"].str[2:], errors="coerce")
+        next_num = int(np.nanmax(existing_nums)) + 1 if existing_nums.notna().any() else 1
+        new_ids = [f"R-{num:03d}" for num in range(next_num, next_num + missing_ids.sum())]
+        edited_df.loc[missing_ids, "Risk ID"] = new_ids
+
+    # Recalculate scores
+    edited_df["Inherent Risk Score"] = edited_df.apply(
+        lambda r: calculate_risk_score(r["Likelihood"], r["Impact"]), axis=1
+    )
+
+    control_map = st.session_state.control_register.set_index("Control Name") if not st.session_state.control_register.empty else pd.DataFrame().set_index(pd.Index([]))
+
+    def _residual(row):
+        name = row.get("Mapped Control", None)
+        if name and name != "None" and name in control_map.index:
+            crow = control_map.loc[name]
+            eff = crow.get("Control Efficacy Score", np.nan)
+            dim = crow.get("Dimension Controlled", None)
+            return calculate_residual_risk(row["Likelihood"], row["Impact"], eff, dim)
+        return row["Inherent Risk Score"]
+
+    edited_df["Residual Risk Score"] = edited_df.apply(_residual, axis=1)
+
     st.session_state.risk_register = edited_df
 
 # =========================
@@ -163,79 +237,96 @@ with tab1:
 # =========================
 with tab2:
     st.subheader("Control Register")
-    st.caption("List and assess the efficacy of your risk controls using the DIME framework.")
+    st.caption("Assess control efficacy using the weighted DIME framework (see sidebar).")
 
-    edited_df_controls = st.data_editor(
+    controls_df = st.data_editor(
         st.session_state.control_register,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
+            "Control Name": st.column_config.TextColumn("Control Name", required=True),
+            "Description": st.column_config.TextColumn("Description"),
             "Dimension Controlled": st.column_config.SelectboxColumn("Dimension Controlled", options=["Likelihood", "Impact"], required=True),
-            "Design": st.column_config.NumberColumn("Design (0-3)", min_value=0, max_value=3, step=1),
-            "Implementation": st.column_config.NumberColumn("Implementation (0-3)", min_value=0, max_value=3, step=1),
-            "Monitoring": st.column_config.NumberColumn("Monitoring (0-3)", min_value=0, max_value=3, step=1),
-            "Evaluation": st.column_config.NumberColumn("Evaluation (0-3)", min_value=0, max_value=3, step=1),
-            "Control Efficacy Score": st.column_config.NumberColumn("Control Efficacy Score", disabled=True)
-        }
+            "Design": st.column_config.NumberColumn("Design (0–3)", min_value=0, max_value=3, step=1),
+            "Implementation": st.column_config.NumberColumn("Implementation (0–3)", min_value=0, max_value=3, step=1),
+            "Monitoring": st.column_config.NumberColumn("Monitoring (0–3)", min_value=0, max_value=3, step=1),
+            "Evaluation": st.column_config.NumberColumn("Evaluation (0–3)", min_value=0, max_value=3, step=1),
+            "Control Efficacy Score": st.column_config.NumberColumn("Control Efficacy (raw)", disabled=True, help="0–1 value used in calculations"),
+        },
     )
 
-    edited_df_controls['Control Efficacy Score'] = edited_df_controls.apply(
-        lambda row: calculate_control_efficacy(row['Design'], row['Implementation'], row['Monitoring'], row['Evaluation']), axis=1
+    # Compute raw efficacy and also a display percentage column
+    controls_df["Control Efficacy Score"] = controls_df.apply(
+        lambda r: calculate_control_efficacy(r["Design"], r["Implementation"], r["Monitoring"], r["Evaluation"], DIME_WEIGHTS),
+        axis=1,
     )
+    disp_controls = controls_df.copy()
+    disp_controls["Control Efficacy (%)]"] = (disp_controls["Control Efficacy Score"] * 100).round(0)
 
-    st.session_state.control_register = edited_df_controls
+    st.session_state.control_register = controls_df
 
 # =========================
 # Risk Analysis Tab
 # =========================
 with tab3:
     st.subheader("Risk Analysis")
-    st.caption("Analyze your risks by filtering and aggregating data.")
-    
+    st.caption("Filter, aggregate, and visualize residual risk.")
+
     df = st.session_state.risk_register.copy()
-    if df.empty or df['Risk Name'].isnull().all():
+    if df.empty or df["Risk Name"].isnull().all():
         st.info("No risks to display. Please add risks in the 'Risk Register' tab.")
         st.stop()
-    
+
+    # Filters
     st.markdown("#### Filter Risks")
-    filter_cols = st.columns(3)
-    
-    risk_names = ['All'] + df['Risk Name'].unique().tolist()
-    selected_risks = filter_cols[0].multiselect("Filter by Risk Name", options=risk_names, default=['All'])
-    
-    risk_categories = ['All'] + df['Risk Category'].unique().tolist()
-    selected_categories = filter_cols[1].multiselect("Filter by Risk Category", options=risk_categories, default=['All'])
-    
-    risk_periods = ['All'] + df['Period'].unique().tolist()
-    selected_periods = filter_cols[2].multiselect("Filter by Period", options=risk_periods, default=['All'])
-    
+    c1, c2, c3 = st.columns(3)
+    risk_names = ["All"] + df["Risk Name"].dropna().unique().tolist()
+    selected_risks = c1.multiselect("By Risk Name", options=risk_names, default=["All"])
+    risk_categories = ["All"] + df["Risk Category"].dropna().unique().tolist()
+    selected_categories = c2.multiselect("By Category", options=risk_categories, default=["All"])
+    risk_periods = ["All"] + df["Period"].dropna().unique().tolist()
+    selected_periods = c3.multiselect("By Period", options=risk_periods, default=["All"])
+
     filtered_df = df.copy()
-    if 'All' not in selected_risks:
-        filtered_df = filtered_df[filtered_df['Risk Name'].isin(selected_risks)]
-    if 'All' not in selected_categories:
-        filtered_df = filtered_df[filtered_df['Risk Category'].isin(selected_categories)]
-    if 'All' not in selected_periods:
-        filtered_df = filtered_df[filtered_df['Period'].isin(selected_periods)]
+    if "All" not in selected_risks:
+        filtered_df = filtered_df[filtered_df["Risk Name"].isin(selected_risks)]
+    if "All" not in selected_categories:
+        filtered_df = filtered_df[filtered_df["Risk Category"].isin(selected_categories)]
+    if "All" not in selected_periods:
+        filtered_df = filtered_df[filtered_df["Period"].isin(selected_periods)]
 
     if filtered_df.empty:
         st.warning("No risks match the selected filters.")
         st.stop()
-    
+
+    # Header KPIs
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Risks (filtered)", len(filtered_df))
+    k2.metric("Total Residual Score", f"{filtered_df['Residual Risk Score'].sum():.0f}")
+    k3.metric("Open Risks", int((filtered_df["Status"] == "Open").sum()) if "Status" in filtered_df.columns else 0)
+
+    # Table
     st.markdown("#### Filtered Risk Register")
     st.dataframe(filtered_df, use_container_width=True)
 
+    # Aggregations
     st.markdown("---")
     st.markdown("#### Aggregated Risk Score")
-    total_residual_score = filtered_df['Residual Risk Score'].sum()
+    total_residual_score = filtered_df["Residual Risk Score"].sum()
     st.metric("Total Aggregated Residual Risk Score", value=f"{total_residual_score:.2f}")
 
     st.markdown("---")
     st.markdown("#### Aggregated Score Breakdown")
-    breakdown_param = st.selectbox("Group Aggregated Score by:", options=['Risk Category', 'Risk Response', 'Period'])
+    breakdown_param = st.selectbox(
+        "Group Aggregated Score by:",
+        options=["Risk Category", "Risk Response", "Period", "Owner", "Status"],
+    )
     if breakdown_param:
-        aggregated_breakdown = filtered_df.groupby(breakdown_param)['Residual Risk Score'].sum().reset_index()
+        aggregated_breakdown = (
+            filtered_df.groupby(breakdown_param)["Residual Risk Score"].sum().reset_index()
+        )
         st.dataframe(aggregated_breakdown, use_container_width=True)
-    
+
     st.markdown("---")
     st.markdown("#### Residual Risk Matrix")
     create_risk_matrix(filtered_df)
@@ -245,15 +336,76 @@ with tab3:
 # =========================
 with tab4:
     st.subheader("Reporting")
-    st.caption("Download your full risk data as an Excel file.")
+    st.caption("Import/export data, save/load projects, and download Excel reports.")
 
-    df_risks = st.session_state.risk_register
-    df_controls = st.session_state.control_register
+    # ----- Import CSV/XLSX -----
+    st.markdown("#### Import Data")
+    ic1, ic2 = st.columns(2)
+    with ic1:
+        up_risks = st.file_uploader("Upload Risk Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_risks")
+    with ic2:
+        up_controls = st.file_uploader("Upload Control Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_controls")
 
+    def _read_table(file):
+        if file is None:
+            return None
+        if file.name.lower().endswith(".csv"):
+            return pd.read_csv(file)
+        return pd.read_excel(file)
+
+    changed = False
+    if up_risks:
+        rr = _read_table(up_risks)
+        if rr is not None:
+            st.session_state.risk_register = rr
+            changed = True
+    if up_controls:
+        cr = _read_table(up_controls)
+        if cr is not None:
+            st.session_state.control_register = cr
+            changed = True
+    if changed:
+        st.success("Imported successfully. Switch tabs to review.")
+
+    # ----- Save / Load Project (JSON) -----
+    st.markdown("#### Save / Load Project")
+    pj1, pj2 = st.columns(2)
+    with pj1:
+        payload = {
+            "risks": st.session_state.risk_register.to_dict(orient="records"),
+            "controls": st.session_state.control_register.to_dict(orient="records"),
+        }
+        proj_bytes = io.BytesIO(json.dumps(payload, indent=2).encode("utf-8"))
+        st.download_button(
+            "Download Project (.json)",
+            data=proj_bytes.getvalue(),
+            file_name="risk_project.json",
+            mime="application/json",
+        )
+    with pj2:
+        proj_up = st.file_uploader("Load Project (.json)", type=["json"], key="proj_json")
+        if proj_up:
+            data = json.load(proj_up)
+            st.session_state.risk_register = pd.DataFrame(data.get("risks", []))
+            st.session_state.control_register = pd.DataFrame(data.get("controls", []))
+            st.success("Project loaded.")
+
+    # ----- Excel Report -----
+    st.markdown("#### Download Excel Report")
+    df_risks = st.session_state.risk_register.copy()
+    df_controls = st.session_state.control_register.copy()
     if df_risks.empty and df_controls.empty:
-        st.info("No data to report. Please add risks in the 'Risk Register' tab.")
+        st.info("No data to report.")
     else:
-        st.markdown("#### Download Report")
-        df_ranked_risks = df_risks.sort_values(by="Residual Risk Score", ascending=False).reset_index(drop=True)
-        report_data = {"Risk Register": df_risks, "Control Register": df_controls, "Ranked Risks": df_ranked_risks}
-        st.download_button(label="Download Full Risk Report (.xlsx)", data=to_excel(report_data), file_name="risk_management_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        df_ranked = df_risks.sort_values(by="Residual Risk Score", ascending=False).reset_index(drop=True)
+        report_data = {
+            "Risk Register": df_risks,
+            "Control Register": df_controls,
+            "Ranked Risks": df_ranked,
+        }
+        st.download_button(
+            label="Download Full Risk Report (.xlsx)",
+            data=to_excel(report_data),
+            file_name="risk_management_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
