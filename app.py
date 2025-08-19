@@ -1,4 +1,4 @@
-# app.py — Risk Management Portal (enhanced)
+# app.py — Risk Management Portal (enhanced + CSV import)
 # Run: streamlit run app.py
 
 import io
@@ -126,8 +126,38 @@ def to_excel(df_dict: dict) -> bytes:
     return output.getvalue()
 
 
+def _read_table(file) -> pd.DataFrame | None:
+    """Read CSV or Excel into DataFrame."""
+    if file is None:
+        return None
+    if file.name.lower().endswith(".csv"):
+        return pd.read_csv(file)
+    return pd.read_excel(file)
+
+
+def _normalize_risk_register_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce types so st.data_editor column_config matches dataframe dtypes."""
+    df = df.copy()
+    # Dates
+    if "Due Date" in df.columns:
+        df["Due Date"] = pd.to_datetime(df["Due Date"], errors="coerce")
+    # Numbers
+    for col in ["Likelihood", "Impact", "Inherent Risk Score", "Residual Risk Score"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Strings
+    for col in [
+        "Risk ID", "Risk Name", "Description", "Mitigation Actions", "Risk Response",
+        "Mapped Control", "Risk Category", "Period", "Owner", "Status"
+    ]:
+        if col in df.columns:
+            df[col] = df[col].astype("string")
+    return df
+
+
 # ---------- Session State Initialization ----------
 if "risk_register" not in st.session_state:
+    # Start empty; user can import CSV/XLSX or use seeded sample.
     st.session_state.risk_register = pd.DataFrame(
         {
             "Risk ID": ["R-001", "R-002"],
@@ -147,7 +177,7 @@ if "risk_register" not in st.session_state:
             "Owner": ["CISO", "COO"],
             "Status": ["Open", "In Progress"],
             "Due Date": ["2024-12-31", "2024-11-15"],
-            "Residual Risk Score": [np.nan, np.nan],  # computed live
+            "Residual Risk Score": [np.nan, np.nan],
         }
     )
 
@@ -175,12 +205,29 @@ tab1, tab2, tab3, tab4 = st.tabs(["Risk Register", "Control Register", "Risk Ana
 # =========================
 with tab1:
     st.subheader("Risk Register")
-    st.caption("Define and manage all identified risks.")
+    st.caption("Import from CSV/Excel or edit inline. Columns must include: Risk Name, Likelihood, Impact, Risk Category, Period.")
 
+    # --- Import Risk Register here ---
+    left, right = st.columns([1, 3])
+    with left:
+        uploaded_rr = st.file_uploader("Import Risk Register (.csv/.xlsx)", type=["csv", "xlsx"], key="rr_import")
+        if uploaded_rr:
+            df_in = _read_table(uploaded_rr)
+            if isinstance(df_in, pd.DataFrame):
+                st.session_state.risk_register = df_in
+                st.success("Risk Register imported.")
+    with right:
+        st.info("Tip: You can also import/export in the Reporting tab.")
+
+    # Prepare control options
     control_list = ["None"] + st.session_state.control_register["Control Name"].dropna().unique().tolist()
 
+    # --- normalize types for editor ---
+    df_rr = _normalize_risk_register_types(st.session_state.risk_register)
+
+    # ---- editor ----
     edited_df = st.data_editor(
-        st.session_state.risk_register,
+        df_rr,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
@@ -217,7 +264,11 @@ with tab1:
         lambda r: calculate_risk_score(r["Likelihood"], r["Impact"]), axis=1
     )
 
-    control_map = st.session_state.control_register.set_index("Control Name") if not st.session_state.control_register.empty else pd.DataFrame().set_index(pd.Index([]))
+    control_map = (
+        st.session_state.control_register.set_index("Control Name")
+        if not st.session_state.control_register.empty
+        else pd.DataFrame().set_index(pd.Index([]))
+    )
 
     def _residual(row):
         name = row.get("Mapped Control", None)
@@ -230,6 +281,7 @@ with tab1:
 
     edited_df["Residual Risk Score"] = edited_df.apply(_residual, axis=1)
 
+    # Save back
     st.session_state.risk_register = edited_df
 
 # =========================
@@ -261,7 +313,7 @@ with tab2:
         axis=1,
     )
     disp_controls = controls_df.copy()
-    disp_controls["Control Efficacy (%)]"] = (disp_controls["Control Efficacy Score"] * 100).round(0)
+    disp_controls["Control Efficacy (%)"] = (disp_controls["Control Efficacy Score"] * 100).round(0)
 
     st.session_state.control_register = controls_df
 
@@ -274,7 +326,7 @@ with tab3:
 
     df = st.session_state.risk_register.copy()
     if df.empty or df["Risk Name"].isnull().all():
-        st.info("No risks to display. Please add risks in the 'Risk Register' tab.")
+        st.info("No risks to display. Please add or import risks in the 'Risk Register' tab.")
         st.stop()
 
     # Filters
@@ -342,16 +394,9 @@ with tab4:
     st.markdown("#### Import Data")
     ic1, ic2 = st.columns(2)
     with ic1:
-        up_risks = st.file_uploader("Upload Risk Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_risks")
+        up_risks = st.file_uploader("Upload Risk Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_risks_rep")
     with ic2:
-        up_controls = st.file_uploader("Upload Control Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_controls")
-
-    def _read_table(file):
-        if file is None:
-            return None
-        if file.name.lower().endswith(".csv"):
-            return pd.read_csv(file)
-        return pd.read_excel(file)
+        up_controls = st.file_uploader("Upload Control Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_controls_rep")
 
     changed = False
     if up_risks:
@@ -397,7 +442,11 @@ with tab4:
     if df_risks.empty and df_controls.empty:
         st.info("No data to report.")
     else:
+        # Ensure numeric for sorting
+        if "Residual Risk Score" in df_risks.columns:
+            df_risks["Residual Risk Score"] = pd.to_numeric(df_risks["Residual Risk Score"], errors="coerce")
         df_ranked = df_risks.sort_values(by="Residual Risk Score", ascending=False).reset_index(drop=True)
+
         report_data = {
             "Risk Register": df_risks,
             "Control Register": df_controls,
