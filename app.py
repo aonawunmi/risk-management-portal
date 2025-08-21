@@ -1,437 +1,530 @@
-# app.py — Risk Management Portal (complete)
-# Run: streamlit run app.py
+# app.py — MinRisk Increment A (Config + Inherent Risk Register)
+# Run: python3 -m streamlit run app.py
+# Python 3.9+ compatible
 
 import io
 import json
+from typing import Optional, Dict, List, Tuple
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import streamlit as st
+from datetime import datetime
 
-# ---------- App setup ----------
-st.set_page_config(
-    page_title="Risk Management Portal",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# -------------------------------
+# App Setup
+# -------------------------------
+st.set_page_config(page_title="MinRisk — Inherent Register (Increment A)", layout="wide")
 
-st.title("Risk Management Portal")
-st.caption(
-    "Define risks & controls, analyze exposure, and export reports. "
-    "Use the sidebar to tune DIME weights globally."
-)
+st.title("MinRisk — Inherent Risk Register (Increment A)")
+st.caption("Config first. Then capture the inherent risk register with 1–6 scales, "
+           "descriptor-driven Likelihood/Impact, and Risk Code generation (DIV-DEP-UNIT-NNN).")
 
-# ---------- Sidebar: DIME Weights ----------
-with st.sidebar:
-    st.markdown("### DIME Weights")
-    wD = st.slider("Design weight", 0.0, 1.0, 0.35, 0.05)
-    wI = st.slider("Implementation weight", 0.0, 1.0, 0.35, 0.05)
-    wM = st.slider("Monitoring weight", 0.0, 1.0, 0.15, 0.05)
-    wE = st.slider("Evaluation weight", 0.0, 1.0, 0.15, 0.05)
-    DIME_WEIGHTS = {"D": wD, "I": wI, "M": wM, "E": wE}
+# -------------------------------
+# Defaults (seed data)
+# -------------------------------
+DEFAULT_ORGSTRUCTURE = pd.DataFrame({
+    "Division Code": ["FIN", "FIN", "OPS"],
+    "Division Name": ["Finance", "Finance", "Operations"],
+    "Department Code": ["TRD", "TRD", "SCM"],
+    "Department Name": ["Treasury Dealing", "Treasury Dealing", "Supplies"],
+    "Unit Code": ["AP", "AR", "WH"],
+    "Internal Unit Name": ["Accounts Payable", "Accounts Receivable", "Warehousing"],
+    "Active": [True, True, True],
+})
 
-# ---------- Helper Functions ----------
-def calculate_risk_score(likelihood, impact):
-    if pd.isna(likelihood) or pd.isna(impact):
-        return np.nan
-    return likelihood * impact
+DEFAULT_RISKTAXONOMY = pd.DataFrame({
+    "Main Category Code": ["OPR", "FIN", "STR", "CMP"],
+    "Main Category Name": ["Operational", "Financial", "Strategic", "Compliance"],
+    "Sub-Category Code": ["CYB", "LIQ", "SCM", "KYC"],
+    "Sub-Category Name": ["Cybersecurity", "Liquidity", "Supply Chain", "KYC/AML"],
+    "Category": ["Operational", "Financial", "Strategic", "Compliance"],
+    "Active": [True, True, True, True],
+})
 
-def calculate_control_efficacy(design, implementation, monitoring, evaluation, w=None):
-    """
-    Weighted DIME efficacy on [0,1]. Returns np.nan if any score missing.
-    Efficacy is 0 if Design or Implementation is 0.
-    """
-    if any(pd.isna(x) for x in [design, implementation, monitoring, evaluation]):
-        return np.nan
-    if design == 0 or implementation == 0:
-        return 0.0
-    if w is None:
-        w = {"D": 0.35, "I": 0.35, "M": 0.15, "E": 0.15}
-    total_w = w["D"] + w["I"] + w["M"] + w["E"]
-    score = (
-        w["D"] * design +
-        w["I"] * implementation +
-        w["M"] * monitoring +
-        w["E"] * evaluation
-    ) / (3 * total_w)
-    return round(float(score), 4)
+DEFAULT_SCALES_L = pd.DataFrame({
+    "Descriptor": [
+        "Improbable/Remote",
+        "Unlikely/Might happen",
+        "Possible",
+        "Good Chance",
+        "Probable/Likely",
+        "Definitely/Certain",
+    ],
+    "Score": [1, 2, 3, 4, 5, 6],
+})
 
-def calculate_residual_risk(inherent_likelihood, inherent_impact, control_eff_score, controlled_dimension):
-    if pd.isna(inherent_likelihood) or pd.isna(inherent_impact) or pd.isna(control_eff_score):
-        return np.nan
-    adjusted_likelihood = inherent_likelihood
-    adjusted_impact = inherent_impact
-    if controlled_dimension == "Likelihood":
-        adjusted_likelihood = max(1, round(inherent_likelihood * (1 - control_eff_score)))
-    elif controlled_dimension == "Impact":
-        adjusted_impact = max(1, round(inherent_impact * (1 - control_eff_score)))
-    return adjusted_likelihood * adjusted_impact
+DEFAULT_SCALES_I = pd.DataFrame({
+    "Descriptor": [
+        "Minimal or Insignificant",
+        "Slight or Minor",
+        "Moderate",
+        "High",
+        "Very High",
+        "Severe or Catastrophic",
+    ],
+    "Score": [1, 2, 3, 4, 5, 6],
+})
 
-def create_risk_matrix(df: pd.DataFrame):
-    """Improved 5x5 matrix with grid + high-risk shading."""
-    if df.empty:
-        st.info("No data to chart.")
-        return
-    max_score = df["Residual Risk Score"].max() if df["Residual Risk Score"].notna().any() else 1
-    fig = px.scatter(
-        df,
-        x="Likelihood",
-        y="Impact",
-        color="Residual Risk Score",
-        size="Residual Risk Score",
-        hover_name="Risk Name",
-        hover_data={
-            "Risk ID": True,
-            "Inherent Risk Score": True,
-            "Mapped Control": True,
-            "Risk Category": True,
-            "Status": True,
-            "Residual Risk Score": True,
-        },
-        color_continuous_scale=px.colors.sequential.YlOrRd,
-        range_color=[0, max_score],
-    )
-    shapes = []
-    for i in range(1, 6):
-        shapes.append(dict(type="line", x0=0.5, x1=5.5, y0=i, y1=i, line=dict(color="rgba(150,150,150,0.2)")))
-        shapes.append(dict(type="line", x0=i, x1=i, y0=0.5, y1=5.5, line=dict(color="rgba(150,150,150,0.2)")))
-    shapes.append(dict(type="rect", x0=3.5, x1=5.5, y0=3.5, y1=5.5, fillcolor="rgba(255,0,0,0.05)", line=dict(width=0)))
-    fig.update_layout(
-        title="Residual Risk Matrix",
-        xaxis=dict(tickvals=[1,2,3,4,5], range=[0.5, 5.5], title="Likelihood"),
-        yaxis=dict(tickvals=[1,2,3,4,5], range=[0.5, 5.5], title="Impact"),
-        shapes=shapes,
-        height=560,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+DEFAULT_DIME_WEIGHTS = pd.DataFrame({
+    "Design": [0.35], "Implementation": [0.35], "Monitoring": [0.15], "Evaluation": [0.15]
+})
 
-def to_excel(df_dict: dict) -> bytes:
-    """Create a multi-sheet Excel in-memory."""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet_name, df in df_dict.items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-    return output.getvalue()
+DEFAULT_APPETITE = pd.DataFrame({
+    "Lower": [0, 6, 13, 22],
+    "Upper": [6, 13, 22, 36],
+    "Band": ["LOW", "MODEST", "MODERATE", "HIGH"],
+    "Color": ["GREEN", "YELLOW", "AMBER", "RED"],
+})
 
-def _read_table(file) -> pd.DataFrame | None:
-    """Read CSV or Excel into DataFrame."""
-    if file is None:
-        return None
-    if file.name.lower().endswith(".csv"):
-        return pd.read_csv(file)
-    return pd.read_excel(file)
+DEFAULT_COUNTERS = pd.DataFrame({
+    "Unit Code": ["AP", "AR", "WH"],
+    "Last Counter": [6, 12, 4],
+})
 
-def _normalize_risk_register_types(df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce types so st.data_editor column_config matches dataframe dtypes."""
+DEFAULT_USERS = pd.DataFrame({"User Display Name": ["Risk Manager", "CISO", "COO"]})
+
+# Expected Inherent Register columns (+ optional Period)
+INHERENT_COLUMNS = [
+    "Risk Code", "Division", "Departments", "Internal Unit",
+    "Risk Main Category", "Risk Sub-Category",
+    "There is a risk of", "as a result of", "which may lead to",
+    "Inherent Risk Likelihood", "Inherent Risk Impact", "Inherent Risk Severity", "Period"
+]
+
+# -------------------------------
+# Session State Initialization
+# -------------------------------
+def _init_state_df(key: str, df: pd.DataFrame):
+    if key not in st.session_state:
+        st.session_state[key] = df.copy()
+
+_init_state_df("cfg_org", DEFAULT_ORGSTRUCTURE)
+_init_state_df("cfg_tax", DEFAULT_RISKTAXONOMY)
+_init_state_df("cfg_scale_L", DEFAULT_SCALES_L)
+_init_state_df("cfg_scale_I", DEFAULT_SCALES_I)
+_init_state_df("cfg_dime_w", DEFAULT_DIME_WEIGHTS)
+_init_state_df("cfg_appetite", DEFAULT_APPETITE)
+_init_state_df("cfg_counters", DEFAULT_COUNTERS)
+_init_state_df("cfg_users", DEFAULT_USERS)
+
+if "inherent_register" not in st.session_state:
+    st.session_state.inherent_register = pd.DataFrame(columns=INHERENT_COLUMNS)
+
+if "audit_log" not in st.session_state:
+    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "User", "Action", "Entity", "Identifier", "Details"])
+
+# -------------------------------
+# Helpers
+# -------------------------------
+def log_action(user: str, action: str, entity: str, identifier: str, details: str = ""):
+    entry = {
+        "Timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "User": user or "Unknown",
+        "Action": action,
+        "Entity": entity,
+        "Identifier": identifier,
+        "Details": details,
+    }
+    st.session_state.audit_log = pd.concat([st.session_state.audit_log, pd.DataFrame([entry])], ignore_index=True)
+
+def normalize_inherent_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    if "Due Date" in df.columns:
-        df["Due Date"] = pd.to_datetime(df["Due Date"], errors="coerce")
-    for col in ["Likelihood", "Impact", "Inherent Risk Score", "Residual Risk Score"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    # strings
     for col in [
-        "Risk ID", "Risk Name", "Description", "Mitigation Actions", "Risk Response",
-        "Mapped Control", "Risk Category", "Period", "Owner", "Status"
+        "Risk Code", "Division", "Departments", "Internal Unit",
+        "Risk Main Category", "Risk Sub-Category",
+        "There is a risk of", "as a result of", "which may lead to", "Period"
     ]:
         if col in df.columns:
             df[col] = df[col].astype("string")
+    # descriptors kept as strings
+    for col in ["Inherent Risk Likelihood", "Inherent Risk Impact"]:
+        if col in df.columns:
+            df[col] = df[col].astype("string")
+    # numeric
+    if "Inherent Risk Severity" in df.columns:
+        df["Inherent Risk Severity"] = pd.to_numeric(df["Inherent Risk Severity"], errors="coerce")
     return df
 
-# --- JSON helpers (make DataFrames serializable) ---
+def ensure_inherent_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in INHERENT_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+    return df[INHERENT_COLUMNS]
+
+def descriptor_to_score(map_df: pd.DataFrame, descriptor: Optional[str]) -> Optional[int]:
+    if descriptor is None or pd.isna(descriptor):
+        return None
+    row = map_df.loc[map_df["Descriptor"] == descriptor]
+    if row.empty:
+        return None
+    return int(row["Score"].values[0])
+
+def compute_inherent_severity(df: pd.DataFrame, scale_L: pd.DataFrame, scale_I: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    scores_L = df["Inherent Risk Likelihood"].apply(lambda d: descriptor_to_score(scale_L, d))
+    scores_I = df["Inherent Risk Impact"].apply(lambda d: descriptor_to_score(scale_I, d))
+    df["Inherent Risk Severity"] = pd.to_numeric(scores_L) * pd.to_numeric(scores_I)
+    return df
+
+def parse_risk_code_get_counter(code: str) -> Optional[int]:
+    # Expect pattern DIV-DEP-UNIT-NNN
+    try:
+        if not isinstance(code, str) or "-" not in code:
+            return None
+        tail = code.split("-")[-1]
+        return int(tail)
+    except Exception:
+        return None
+
+def next_counter_for_unit(unit_code: str, existing_codes: List[str], counters_df: pd.DataFrame) -> int:
+    # derive from existing codes first
+    existing = [
+        parse_risk_code_get_counter(code)
+        for code in existing_codes
+        if isinstance(code, str) and code.endswith(tuple([f"-{i:03d}" for i in range(1, 20000)]))
+        and code.split("-")[-2] == unit_code
+    ]
+    max_existing = max([c for c in existing if c is not None], default=0)
+
+    # seed from cfg_counters if higher
+    seed = 0
+    row = counters_df.loc[counters_df["Unit Code"] == unit_code]
+    if not row.empty:
+        try:
+            seed = int(row["Last Counter"].values[0])
+        except Exception:
+            seed = 0
+
+    return max(max_existing, seed) + 1
+
+def compose_risk_code(div_code: str, dep_code: str, unit_code: str, counter: int) -> str:
+    return f"{div_code}-{dep_code}-{unit_code}-{counter:03d}"
+
+def update_counters(unit_code: str, new_counter: int):
+    df = st.session_state.cfg_counters.copy()
+    if unit_code in df["Unit Code"].values:
+        st.session_state.cfg_counters.loc[df["Unit Code"] == unit_code, "Last Counter"] = new_counter
+    else:
+        st.session_state.cfg_counters = pd.concat([
+            df,
+            pd.DataFrame([{"Unit Code": unit_code, "Last Counter": new_counter}])
+        ], ignore_index=True)
+
+def generate_missing_risk_codes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For rows missing Risk Code, generate DIV-DEP-UNIT-NNN by looking up codes from OrgStructure
+    and using a per-Unit counter (highest of existing codes or cfg_counters + 1).
+    """
+    df = df.copy()
+    org = st.session_state.cfg_org
+    # Build quick sets for validation (codes only)
+    div_codes = set(org["Division Code"].dropna().astype(str))
+    dep_codes = set(org["Department Code"].dropna().astype(str))
+    unit_codes = set(org["Unit Code"].dropna().astype(str))
+
+    existing_codes = df["Risk Code"].dropna().astype(str).tolist()
+
+    for idx, row in df.iterrows():
+        rc = row.get("Risk Code")
+        if isinstance(rc, str) and rc.strip():
+            continue  # already present
+        div = str(row.get("Division") or "").strip()
+        dep = str(row.get("Departments") or "").strip()
+        unit = str(row.get("Internal Unit") or "").strip()
+        # Validate presence in org codes
+        if not (div in div_codes and dep in dep_codes and unit in unit_codes):
+            # cannot generate without valid codes
+            continue
+        nxt = next_counter_for_unit(unit, existing_codes, st.session_state.cfg_counters)
+        code = compose_risk_code(div, dep, unit, nxt)
+        df.at[idx, "Risk Code"] = code
+        existing_codes.append(code)
+        update_counters(unit, nxt)
+    return df
+
+# ---- JSON serialization helpers (safe) ----
 def _clean_value(v):
-    import numpy as _np
-    import pandas as _pd
     if v is None:
         return None
     try:
-        if _pd.isna(v):
+        if pd.isna(v):
             return None
     except Exception:
         pass
-    if isinstance(v, (_pd.Timestamp,)):
+    if isinstance(v, (pd.Timestamp, )):
         return v.strftime("%Y-%m-%d")
-    if isinstance(v, (_np.datetime64,)):
-        return _pd.to_datetime(v).strftime("%Y-%m-%d")
-    if isinstance(v, (_np.integer,)):
+    if isinstance(v, (np.datetime64, )):
+        return pd.to_datetime(v).strftime("%Y-%m-%d")
+    if isinstance(v, (np.integer, )):
         return int(v)
-    if isinstance(v, (_np.floating,)):
+    if isinstance(v, (np.floating, )):
         return float(v)
     return v
 
-def df_to_records_serializable(df: pd.DataFrame):
-    records = []
-    for rec in df.to_dict(orient="records"):
-        records.append({k: _clean_value(v) for k, v in rec.items()})
-    return records
+def df_records_serializable(df: pd.DataFrame):
+    return [{k: _clean_value(v) for k, v in rec.items()} for rec in df.to_dict(orient="records")]
 
-# ---------- Session State Initialization ----------
-if "risk_register" not in st.session_state:
-    st.session_state.risk_register = pd.DataFrame({
-        "Risk ID": ["R-001", "R-002"],
-        "Risk Name": ["Cybersecurity Threat", "Supply Chain Disruption"],
-        "Description": ["Unauthorized access to company data.", "Breakdown in critical supply chain."],
-        "Likelihood": [4, 3],
-        "Impact": [5, 4],
-        "Inherent Risk Score": [20, 12],
-        "Mitigation Actions": ["Implement stronger firewalls.", "Diversify key suppliers."],
-        "Risk Response": ["Control", "Transfer"],
-        "Mapped Control": ["Control A", "Control B"],
-        "Risk Category": ["Operational", "Strategic"],
-        "Period": ["Q1-2024", "Q1-2024"],
-        "Owner": ["CISO", "COO"],
-        "Status": ["Open", "In Progress"],
-        "Due Date": ["2024-12-31", "2024-11-15"],
-        "Residual Risk Score": [np.nan, np.nan],
-    })
+def save_project_bytes() -> bytes:
+    payload = {
+        "config": {
+            "OrgStructure": df_records_serializable(st.session_state.cfg_org),
+            "RiskTaxonomy": df_records_serializable(st.session_state.cfg_tax),
+            "Scales_Likelihood": df_records_serializable(st.session_state.cfg_scale_L),
+            "Scales_Impact": df_records_serializable(st.session_state.cfg_scale_I),
+            "DIME_Weights": df_records_serializable(st.session_state.cfg_dime_w),
+            "AppetiteBands": df_records_serializable(st.session_state.cfg_appetite),
+            "Counters": df_records_serializable(st.session_state.cfg_counters),
+            "Users": df_records_serializable(st.session_state.cfg_users),
+        },
+        "data": {
+            "InherentRegister": df_records_serializable(st.session_state.inherent_register),
+        },
+        "audit": df_records_serializable(st.session_state.audit_log),
+        "version": "A.1",
+    }
+    return json.dumps(payload, indent=2).encode("utf-8")
 
-if "control_register" not in st.session_state:
-    st.session_state.control_register = pd.DataFrame({
-        "Control Name": ["Control A", "Control B"],
-        "Description": ["Firewall policy.", "Supplier diversification."],
-        "Dimension Controlled": ["Likelihood", "Impact"],
-        "Design": [3, 2],
-        "Implementation": [3, 3],
-        "Monitoring": [3, 2],
-        "Evaluation": [2, 3],
-        "Control Efficacy Score": [0.83, 0.75],  # raw, recalculated each render
-    })
+def load_project(file_bytes: bytes):
+    payload = json.loads(file_bytes.decode("utf-8"))
+    cfg = payload.get("config", {})
+    data = payload.get("data", {})
+    audit = payload.get("audit", [])
 
-# ---------- UI Tabs ----------
-tab1, tab2, tab3, tab4 = st.tabs(["Risk Register", "Control Register", "Risk Analysis", "Reporting"])
+    st.session_state.cfg_org = pd.DataFrame(cfg.get("OrgStructure", []))
+    st.session_state.cfg_tax = pd.DataFrame(cfg.get("RiskTaxonomy", []))
+    st.session_state.cfg_scale_L = pd.DataFrame(cfg.get("Scales_Likelihood", []))
+    st.session_state.cfg_scale_I = pd.DataFrame(cfg.get("Scales_Impact", []))
+    st.session_state.cfg_dime_w = pd.DataFrame(cfg.get("DIME_Weights", []))
+    st.session_state.cfg_appetite = pd.DataFrame(cfg.get("AppetiteBands", []))
+    st.session_state.cfg_counters = pd.DataFrame(cfg.get("Counters", []))
+    st.session_state.cfg_users = pd.DataFrame(cfg.get("Users", []))
+    st.session_state.inherent_register = ensure_inherent_columns(pd.DataFrame(data.get("InherentRegister", [])))
+    st.session_state.audit_log = pd.DataFrame(audit)
 
-# =========================
-# Risk Register Tab
-# =========================
-with tab1:
-    st.subheader("Risk Register")
-    st.caption("Import from CSV/Excel or edit inline. Columns should at least include: Risk Name, Likelihood, Impact, Risk Category, Period.")
+# -------------------------------
+# Sidebar — Current user & Project I/O
+# -------------------------------
+with st.sidebar:
+    st.markdown("### Session")
+    current_user = st.selectbox(
+        "Current user",
+        options=st.session_state.cfg_users["User Display Name"].tolist(),
+        index=0
+    )
+    st.caption("Used for audit log entries.")
 
-    # Import Risk Register here
-    cL, cR = st.columns([1, 3])
-    with cL:
-        uploaded_rr = st.file_uploader("Import Risk Register (.csv/.xlsx)", type=["csv", "xlsx"], key="rr_import")
-        if uploaded_rr:
-            df_in = _read_table(uploaded_rr)
-            if isinstance(df_in, pd.DataFrame):
-                st.session_state.risk_register = df_in
-                st.success("Risk Register imported.")
-    with cR:
-        st.info("Tip: You can also import/export in the Reporting tab.")
+    st.markdown("---")
+    st.markdown("### Project Save/Load")
+    b = st.download_button("Download Project (.json)", data=save_project_bytes(),
+                           file_name="minrisk_project.json", mime="application/json")
+    proj_up = st.file_uploader("Load Project (.json)", type=["json"], key="proj_json_all")
+    if proj_up:
+        load_project(proj_up.read())
+        st.success("Project loaded.")
+        log_action(current_user, "Load Project", "Project", "minrisk_project.json")
 
-    control_list = ["None"] + st.session_state.control_register["Control Name"].dropna().unique().tolist()
+# -------------------------------
+# Tabs
+# -------------------------------
+tab_cfg, tab_reg, tab_audit = st.tabs(["Config", "Inherent Register", "Audit Log"])
 
-    # Normalize types for editor
-    df_rr = _normalize_risk_register_types(st.session_state.risk_register)
+# ===============================
+# Config Tab
+# ===============================
+with tab_cfg:
+    st.subheader("Configuration")
+    st.caption("Edit your reference data. All lists drive dropdowns and validations in the register. "
+               "DIME weights/Appetite are global and will apply in later increments.")
 
-    edited_df = st.data_editor(
-        df_rr,
+    sub1, sub2 = st.tabs(["Organization & Taxonomy", "Scales, Appetite & DIME"])
+
+    with sub1:
+        st.markdown("#### Organization Structure")
+        st.info("Codes must be unique and **Active=True** to appear in dropdowns.")
+        st.session_state.cfg_org = st.data_editor(
+            st.session_state.cfg_org,
+            num_rows="dynamic", use_container_width=True,
+            column_config={
+                "Division Code": st.column_config.TextColumn("Division Code", required=True),
+                "Division Name": st.column_config.TextColumn("Division Name"),
+                "Department Code": st.column_config.TextColumn("Department Code", required=True),
+                "Department Name": st.column_config.TextColumn("Department Name"),
+                "Unit Code": st.column_config.TextColumn("Unit Code", required=True),
+                "Internal Unit Name": st.column_config.TextColumn("Internal Unit Name"),
+                "Active": st.column_config.CheckboxColumn("Active", default=True),
+            },
+        )
+
+        st.markdown("#### Risk Taxonomy")
+        st.session_state.cfg_tax = st.data_editor(
+            st.session_state.cfg_tax,
+            num_rows="dynamic", use_container_width=True,
+            column_config={
+                "Main Category Code": st.column_config.TextColumn("Main Category Code", required=True),
+                "Main Category Name": st.column_config.TextColumn("Main Category Name"),
+                "Sub-Category Code": st.column_config.TextColumn("Sub-Category Code", required=True),
+                "Sub-Category Name": st.column_config.TextColumn("Sub-Category Name"),
+                "Category": st.column_config.SelectboxColumn(
+                    "Category", options=["Operational","Financial","Strategic","Compliance"], required=True),
+                "Active": st.column_config.CheckboxColumn("Active", default=True),
+            },
+        )
+
+        st.markdown("#### Counters (per Unit Code)")
+        st.session_state.cfg_counters = st.data_editor(
+            st.session_state.cfg_counters,
+            num_rows="dynamic", use_container_width=True,
+            column_config={
+                "Unit Code": st.column_config.TextColumn("Unit Code", required=True),
+                "Last Counter": st.column_config.NumberColumn("Last Counter", min_value=0, step=1),
+            },
+        )
+
+        st.markdown("#### Users (for Audit)")
+        st.session_state.cfg_users = st.data_editor(
+            st.session_state.cfg_users,
+            num_rows="dynamic", use_container_width=True,
+            column_config={"User Display Name": st.column_config.TextColumn("User Display Name", required=True)},
+        )
+
+    with sub2:
+        st.markdown("#### Likelihood Scale (Descriptors → Scores 1–6)")
+        st.session_state.cfg_scale_L = st.data_editor(
+            st.session_state.cfg_scale_L,
+            num_rows="dynamic", use_container_width=True,
+            column_config={
+                "Descriptor": st.column_config.TextColumn("Descriptor", required=True),
+                "Score": st.column_config.NumberColumn("Score", min_value=1, max_value=6, step=1, required=True),
+            },
+        )
+
+        st.markdown("#### Impact Scale (Descriptors → Scores 1–6)")
+        st.session_state.cfg_scale_I = st.data_editor(
+            st.session_state.cfg_scale_I,
+            num_rows="dynamic", use_container_width=True,
+            column_config={
+                "Descriptor": st.column_config.TextColumn("Descriptor", required=True),
+                "Score": st.column_config.NumberColumn("Score", min_value=1, max_value=6, step=1, required=True),
+            },
+        )
+
+        st.markdown("#### Appetite Bands (Editable)")
+        st.session_state.cfg_appetite = st.data_editor(
+            st.session_state.cfg_appetite,
+            num_rows="dynamic", use_container_width=True,
+            column_config={
+                "Lower": st.column_config.NumberColumn("Lower", min_value=0, max_value=36, step=1),
+                "Upper": st.column_config.NumberColumn("Upper", min_value=1, max_value=36, step=1),
+                "Band": st.column_config.SelectboxColumn(
+                    "Band", options=["LOW","MODEST","MODERATE","HIGH"], required=True),
+                "Color": st.column_config.SelectboxColumn(
+                    "Color", options=["GREEN","YELLOW","AMBER","RED"], required=True),
+            },
+        )
+
+        st.markdown("#### DIME Weights (Global)")
+        st.session_state.cfg_dime_w = st.data_editor(
+            st.session_state.cfg_dime_w,
+            num_rows="fixed", use_container_width=True,
+            column_config={
+                "Design": st.column_config.NumberColumn("Design", min_value=0.0, max_value=1.0, step=0.01),
+                "Implementation": st.column_config.NumberColumn("Implementation", min_value=0.0, max_value=1.0, step=0.01),
+                "Monitoring": st.column_config.NumberColumn("Monitoring", min_value=0.0, max_value=1.0, step=0.01),
+                "Evaluation": st.column_config.NumberColumn("Evaluation", min_value=0.0, max_value=1.0, step=0.01),
+            },
+        )
+        st.caption("Weights are normalized in computation; zero-override applies later when we add DIME efficacy.")
+
+# ===============================
+# Inherent Register Tab
+# ===============================
+with tab_reg:
+    st.subheader("Inherent Risk Register")
+    st.caption("Use descriptor pickers for Likelihood/Impact. Risk Code is generated from Org codes + per-Unit counter.")
+
+    # Import CSV
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        up = st.file_uploader("Import Inherent Register (.csv)", type=["csv"], key="inherent_csv")
+        if up:
+            df_in = pd.read_csv(up)
+            df_in = ensure_inherent_columns(df_in)
+            st.session_state.inherent_register = df_in
+            st.success("Inherent Register imported.")
+            log_action(current_user, "Import", "Inherent Register", up.name, f"rows={len(df_in)}")
+    with c2:
+        out_csv = st.session_state.inherent_register.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Current Register (CSV)", data=out_csv,
+                           file_name="inherent_register.csv", mime="text/csv")
+
+    # Dropdown options from Config
+    org_active = st.session_state.cfg_org[st.session_state.cfg_org["Active"] == True]
+    div_opts = sorted(org_active["Division Code"].dropna().astype(str).unique().tolist())
+    dep_opts = sorted(org_active["Department Code"].dropna().astype(str).unique().tolist())
+    unit_opts = sorted(org_active["Unit Code"].dropna().astype(str).unique().tolist())
+
+    tax_active = st.session_state.cfg_tax[st.session_state.cfg_tax["Active"] == True]
+    main_cat_opts = sorted(tax_active["Main Category Code"].dropna().astype(str).unique().tolist())
+    sub_cat_opts = sorted(tax_active["Sub-Category Code"].dropna().astype(str).unique().tolist())
+
+    L_opts = st.session_state.cfg_scale_L["Descriptor"].dropna().astype(str).tolist()
+    I_opts = st.session_state.cfg_scale_I["Descriptor"].dropna().astype(str).tolist()
+
+    # Normalize types, compute severity for display
+    reg_df = normalize_inherent_types(st.session_state.inherent_register)
+    reg_df = ensure_inherent_columns(reg_df)
+    reg_df = compute_inherent_severity(reg_df, st.session_state.cfg_scale_L, st.session_state.cfg_scale_I)
+
+    edited = st.data_editor(
+        reg_df,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "Risk ID": st.column_config.TextColumn("Risk ID", disabled=True, help="Stable identifier"),
-            "Risk Name": st.column_config.TextColumn("Risk Name", required=True),
-            "Description": st.column_config.TextColumn("Description"),
-            "Likelihood": st.column_config.NumberColumn("Likelihood (1-5)", min_value=1, max_value=5, step=1, required=True),
-            "Impact": st.column_config.NumberColumn("Impact (1-5)", min_value=1, max_value=5, step=1, required=True),
-            "Inherent Risk Score": st.column_config.NumberColumn("Inherent Risk Score", disabled=True, help="Likelihood × Impact"),
-            "Mitigation Actions": st.column_config.TextColumn("Mitigation Actions"),
-            "Risk Response": st.column_config.SelectboxColumn("Risk Response", options=["Acceptance", "Control", "Avoidance", "Transfer"], required=True),
-            "Mapped Control": st.column_config.SelectboxColumn("Mapped Control", options=control_list, required=True),
-            "Risk Category": st.column_config.SelectboxColumn("Risk Category", options=["Operational", "Financial", "Strategic", "Compliance"], required=True),
-            "Period": st.column_config.TextColumn("Period", help="e.g., Q1-2024", required=True),
-            "Owner": st.column_config.TextColumn("Owner", help="Accountable person/role", required=True),
-            "Status": st.column_config.SelectboxColumn("Status", options=["Open", "In Progress", "Mitigated", "Closed"], required=True),
-            "Due Date": st.column_config.DateColumn("Due Date"),
-            "Residual Risk Score": st.column_config.NumberColumn("Residual Risk Score", disabled=True, help="Post-control score"),
+            "Risk Code": st.column_config.TextColumn("Risk Code", disabled=True, help="Generated: DIV-DEP-UNIT-NNN"),
+            "Division": st.column_config.SelectboxColumn("Division (Code)", options=div_opts, required=True),
+            "Departments": st.column_config.SelectboxColumn("Departments (Code)", options=dep_opts, required=True),
+            "Internal Unit": st.column_config.SelectboxColumn("Internal Unit (Code)", options=unit_opts, required=True),
+            "Risk Main Category": st.column_config.SelectboxColumn("Risk Main Category (Code)", options=main_cat_opts, required=True),
+            "Risk Sub-Category": st.column_config.SelectboxColumn("Risk Sub-Category (Code)", options=sub_cat_opts, required=True),
+            "There is a risk of": st.column_config.TextColumn("There is a risk of", required=True),
+            "as a result of": st.column_config.TextColumn("as a result of", required=True),
+            "which may lead to": st.column_config.TextColumn("which may lead to", required=True),
+            "Inherent Risk Likelihood": st.column_config.SelectboxColumn("Inherent Risk Likelihood (Descriptor)", options=L_opts, required=True),
+            "Inherent Risk Impact": st.column_config.SelectboxColumn("Inherent Risk Impact (Descriptor)", options=I_opts, required=True),
+            "Inherent Risk Severity": st.column_config.NumberColumn("Inherent Risk Severity", disabled=True, help="Score = L×I"),
+            "Period": st.column_config.TextColumn("Period (e.g., Q1-2025)", help="Quarter label; optional"),
         },
     )
 
-    # Assign Risk IDs to new rows
-    if "Risk ID" not in edited_df.columns:
-        edited_df["Risk ID"] = np.nan
-    missing_ids = edited_df["Risk ID"].isna()
-    if missing_ids.any():
-        existing_nums = pd.to_numeric(edited_df["Risk ID"].str[2:], errors="coerce")
-        next_num = int(np.nanmax(existing_nums)) + 1 if existing_nums.notna().any() else 1
-        new_ids = [f"R-{num:03d}" for num in range(next_num, next_num + missing_ids.sum())]
-        edited_df.loc[missing_ids, "Risk ID"] = new_ids
+    # Generate missing Risk Codes (based on codes in row)
+    edited = generate_missing_risk_codes(edited)
+    # Recompute severity again (if user changed descriptors)
+    edited = compute_inherent_severity(edited, st.session_state.cfg_scale_L, st.session_state.cfg_scale_I)
+    # Persist
+    st.session_state.inherent_register = edited
 
-    # Recalculate scores
-    edited_df["Inherent Risk Score"] = edited_df.apply(
-        lambda r: calculate_risk_score(r["Likelihood"], r["Impact"]), axis=1
-    )
-    control_map = (
-        st.session_state.control_register.set_index("Control Name")
-        if not st.session_state.control_register.empty
-        else pd.DataFrame().set_index(pd.Index([]))
-    )
-    def _residual(row):
-        name = row.get("Mapped Control", None)
-        if name and name != "None" and name in control_map.index:
-            crow = control_map.loc[name]
-            eff = crow.get("Control Efficacy Score", np.nan)
-            dim = crow.get("Dimension Controlled", None)
-            return calculate_residual_risk(row["Likelihood"], row["Impact"], eff, dim)
-        return row["Inherent Risk Score"]
-    edited_df["Residual Risk Score"] = edited_df.apply(_residual, axis=1)
-
-    st.session_state.risk_register = edited_df
-
-# =========================
-# Control Register Tab
-# =========================
-with tab2:
-    st.subheader("Control Register")
-    st.caption("Assess control efficacy using the weighted DIME framework (see sidebar).")
-
-    controls_df = st.data_editor(
-        st.session_state.control_register,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "Control Name": st.column_config.TextColumn("Control Name", required=True),
-            "Description": st.column_config.TextColumn("Description"),
-            "Dimension Controlled": st.column_config.SelectboxColumn("Dimension Controlled", options=["Likelihood", "Impact"], required=True),
-            "Design": st.column_config.NumberColumn("Design (0–3)", min_value=0, max_value=3, step=1),
-            "Implementation": st.column_config.NumberColumn("Implementation (0–3)", min_value=0, max_value=3, step=1),
-            "Monitoring": st.column_config.NumberColumn("Monitoring (0–3)", min_value=0, max_value=3, step=1),
-            "Evaluation": st.column_config.NumberColumn("Evaluation (0–3)", min_value=0, max_value=3, step=1),
-            "Control Efficacy Score": st.column_config.NumberColumn("Control Efficacy (raw)", disabled=True, help="0–1 value used in calculations"),
-        },
-    )
-    controls_df["Control Efficacy Score"] = controls_df.apply(
-        lambda r: calculate_control_efficacy(r["Design"], r["Implementation"], r["Monitoring"], r["Evaluation"], DIME_WEIGHTS),
-        axis=1,
-    )
-    st.session_state.control_register = controls_df
-
-# =========================
-# Risk Analysis Tab
-# =========================
-with tab3:
-    st.subheader("Risk Analysis")
-    st.caption("Filter, aggregate, and visualize residual risk.")
-
-    df = st.session_state.risk_register.copy()
-    if df.empty or df["Risk Name"].isnull().all():
-        st.info("No risks to display. Please add or import risks in the 'Risk Register' tab.")
-        st.stop()
-
-    st.markdown("#### Filter Risks")
-    c1, c2, c3 = st.columns(3)
-    risk_names = ["All"] + df["Risk Name"].dropna().unique().tolist()
-    selected_risks = c1.multiselect("By Risk Name", options=risk_names, default=["All"])
-    risk_categories = ["All"] + df["Risk Category"].dropna().unique().tolist()
-    selected_categories = c2.multiselect("By Category", options=risk_categories, default=["All"])
-    risk_periods = ["All"] + df["Period"].dropna().unique().tolist()
-    selected_periods = c3.multiselect("By Period", options=risk_periods, default=["All"])
-
-    filtered_df = df.copy()
-    if "All" not in selected_risks:
-        filtered_df = filtered_df[filtered_df["Risk Name"].isin(selected_risks)]
-    if "All" not in selected_categories:
-        filtered_df = filtered_df[filtered_df["Risk Category"].isin(selected_categories)]
-    if "All" not in selected_periods:
-        filtered_df = filtered_df[filtered_df["Period"].isin(selected_periods)]
-    if filtered_df.empty:
-        st.warning("No risks match the selected filters.")
-        st.stop()
-
+    # KPIs
     k1, k2, k3 = st.columns(3)
-    k1.metric("Risks (filtered)", len(filtered_df))
-    k2.metric("Total Residual Score", f"{filtered_df['Residual Risk Score'].sum():.0f}")
-    k3.metric("Open Risks", int((filtered_df["Status"] == "Open").sum()) if "Status" in filtered_df.columns else 0)
-
-    st.markdown("#### Filtered Risk Register")
-    st.dataframe(filtered_df, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("#### Aggregated Risk Score")
-    total_residual_score = filtered_df["Residual Risk Score"].sum()
-    st.metric("Total Aggregated Residual Risk Score", value=f"{total_residual_score:.2f}")
-
-    st.markdown("---")
-    st.markdown("#### Aggregated Score Breakdown")
-    breakdown_param = st.selectbox(
-        "Group Aggregated Score by:",
-        options=["Risk Category", "Risk Response", "Period", "Owner", "Status"],
-    )
-    if breakdown_param:
-        aggregated_breakdown = filtered_df.groupby(breakdown_param)["Residual Risk Score"].sum().reset_index()
-        st.dataframe(aggregated_breakdown, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("#### Residual Risk Matrix")
-    create_risk_matrix(filtered_df)
-
-# =========================
-# Reporting Tab
-# =========================
-with tab4:
-    st.subheader("Reporting")
-    st.caption("Import/export data, save/load projects, and download Excel reports.")
-
-    st.markdown("#### Import Data")
-    ic1, ic2 = st.columns(2)
-    with ic1:
-        up_risks = st.file_uploader("Upload Risk Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_risks_rep")
-    with ic2:
-        up_controls = st.file_uploader("Upload Control Register (.xlsx/.csv)", type=["xlsx", "csv"], key="up_controls_rep")
-
-    changed = False
-    if up_risks:
-        rr = _read_table(up_risks)
-        if rr is not None:
-            st.session_state.risk_register = rr
-            changed = True
-    if up_controls:
-        cr = _read_table(up_controls)
-        if cr is not None:
-            st.session_state.control_register = cr
-            changed = True
-    if changed:
-        st.success("Imported successfully. Switch tabs to review.")
-
-    # Save / Load Project (JSON) with safe serialization
-    st.markdown("#### Save / Load Project")
-    pj1, pj2 = st.columns(2)
-    with pj1:
-        payload = {
-            "risks": df_to_records_serializable(st.session_state.risk_register),
-            "controls": df_to_records_serializable(st.session_state.control_register),
-        }
-        proj_bytes = io.BytesIO(json.dumps(payload, indent=2).encode("utf-8"))
-        st.download_button(
-            "Download Project (.json)",
-            data=proj_bytes.getvalue(),
-            file_name="risk_project.json",
-            mime="application/json",
-        )
-    with pj2:
-        proj_up = st.file_uploader("Load Project (.json)", type=["json"], key="proj_json")
-        if proj_up:
-            data = json.load(proj_up)
-            st.session_state.risk_register = pd.DataFrame(data.get("risks", []))
-            st.session_state.control_register = pd.DataFrame(data.get("controls", []))
-            st.success("Project loaded.")
-
-    st.markdown("#### Download Excel Report")
-    df_risks = st.session_state.risk_register.copy()
-    df_controls = st.session_state.control_register.copy()
-    if df_risks.empty and df_controls.empty:
-        st.info("No data to report.")
+    k1.metric("Risks", len(edited))
+    if "Inherent Risk Severity" in edited.columns and len(edited) > 0:
+        k2.metric("Avg Severity", f"{pd.to_numeric(edited['Inherent Risk Severity'], errors='coerce').mean():.1f}")
+        k3.metric("Max Severity", f"{pd.to_numeric(edited['Inherent Risk Severity'], errors='coerce').max():.0f}")
     else:
-        if "Residual Risk Score" in df_risks.columns:
-            df_risks["Residual Risk Score"] = pd.to_numeric(df_risks["Residual Risk Score"], errors="coerce")
-        df_ranked = df_risks.sort_values(by="Residual Risk Score", ascending=False).reset_index(drop=True)
-        report_data = {
-            "Risk Register": df_risks,
-            "Control Register": df_controls,
-            "Ranked Risks": df_ranked,
-        }
-        st.download_button(
-            label="Download Full Risk Report (.xlsx)",
-            data=to_excel(report_data),
-            file_name="risk_management_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        k2.metric("Avg Severity", "—"); k3.metric("Max Severity", "—")
+
+    # Buttons for audit logging
+    cols = st.columns(3)
+    if cols[0].button("Log: Saved Inherent Register"):
+        log_action(current_user, "Save", "Inherent Register", "current", f"rows={len(st.session_state.inherent_register)}")
+        st.success("Saved (logged).")
+
+# ===============================
+# Audit Log Tab
+# ===============================
+with tab_audit:
+    st.subheader("Audit Log")
+    st.dataframe(st.session_state.audit_log, use_container_width=True)
+    if st.session_state.audit_log.empty:
+        st.info("No audit entries yet.")
